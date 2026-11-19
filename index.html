@@ -29,7 +29,7 @@ html,body,#m{height:100%;margin:0}body{font:13px/1.4 Inter,system-ui,-apple-syst
 <div id="np"><h3>Мои заметки</h3>
 <div class="bar"><button id="na">+ Заметка</button><button id="np2">+ С меткой на карте</button><button id="ne">Скачать .txt</button><button id="nj">Сохранить .json</button><button id="ni">Загрузить .json</button><input id="nf" type="file" accept=".json" hidden></div>
 <div id="hint"></div><div id="nl"></div>
-<div style="font-size:11px;color:var(--mut)">Заметки сохраняются в этом браузере и остаются после перезагрузки. Для переноса на другое устройство: «Сохранить .json» и «Загрузить .json».</div></div>
+<div id="foot" style="font-size:11px;color:var(--mut)">Заметки сохраняются в этом браузере и остаются после перезагрузки. Для переноса на другое устройство: «Сохранить .json» и «Загрузить .json».</div></div>
 <div class="box"><b>Surf Coffee: зоны аренды</b><div class="lg">
 <div><i style="background:#ff3d00"></i>топ-15 зон (номер = место)</div>
 <div><i style="background:#00e5ff"></i>Surf Coffee (по OSM, проверить)</div>
@@ -45,7 +45,23 @@ const lab=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Refe
 const satG=L.layerGroup([sat,lab]);const map=L.map('m',{layers:[satG]}).setView([55.752,37.6175],12);
 const col=s=>s>=80?'#ff3d00':s>=60?'#ff9100':s>=40?'#ffd600':s>=20?'#76ff03':'#00b0ff';
 const heat=L.layerGroup(D.cells.map(([a,b,s])=>L.rectangle([[a-.0018,b-.0032],[a+.0018,b+.0032]],{stroke:false,fillColor:col(s),fillOpacity:.38}).bindTooltip('балл '+s)));
-const dot=(arr,color,r,f)=>L.layerGroup(arr.filter(f||(()=>1)).map(p=>L.circleMarker([p[0],p[1]],{radius:r,color:'#000',weight:1,fillColor:color,fillOpacity:.95}).bindTooltip(p[2].split('|')[0]||'—')));
+const closed={},reg=[];let api=false,PW='';
+try{PW=localStorage.getItem('surf_pw')||''}catch(e){}
+const paint=m=>{const c=closed[m.k];m.setStyle({fillColor:c?'#555':m.base,fillOpacity:c?.35:.95})};
+async function toggle(m){
+  if(!api){alert('Общие отметки работают только на сервере (ВМ).');return}
+  if(!PW){PW=prompt('Пароль для отметок')||'';if(!PW)return}
+  const r=await fetch('api/closed',{method:'POST',headers:{'X-Pass':PW,'Content-Type':'application/json'},body:JSON.stringify({key:m.k,closed:!closed[m.k]})});
+  if(r.status===403){PW='';alert('Неверный пароль');return}
+  if(!r.ok){alert('Не удалось сохранить: '+r.status);return}
+  try{localStorage.setItem('surf_pw',PW)}catch(e){}
+  Object.keys(closed).forEach(k=>delete closed[k]);Object.assign(closed,await r.json());reg.forEach(paint);m.closePopup();
+}
+const dot=(arr,color,r,f)=>L.layerGroup(arr.filter(f||(()=>1)).map(p=>{
+  const nm=p[2].split('|')[0]||'—',m=L.circleMarker([p[0],p[1]],{radius:r,color:'#000',weight:1,fillColor:color,fillOpacity:.95}).bindTooltip(nm);
+  m.k=nm+'@'+p[0].toFixed(4)+','+p[1].toFixed(4);m.base=color;reg.push(m);
+  m.bindPopup(()=>{const d=document.createElement('div'),b=document.createElement('button');d.textContent=nm+(closed[m.k]?' (закрыто)':'');d.append(document.createElement('br'),b);b.textContent=closed[m.k]?'Открыть снова':'Отметить закрытой';b.onclick=()=>toggle(m);return d});
+  return m}));
 const tag=p=>p[2].split('|')[1]||'';
 const topL=L.layerGroup(D.top.map((t,i)=>L.marker([t.lat,t.lon],{icon:L.divIcon({className:'',html:'<div class="rank">'+(i+1)+'</div>',iconSize:[24,24]})}).bindPopup('<b>#'+(i+1)+' '+t.near+'</b><br>балл '+t.score)));
 const ov={'Теплокарта зон':heat,'Топ-15 зон':topL,
@@ -55,10 +71,39 @@ const ov={'Теплокарта зон':heat,'Топ-15 зон':topL,
 for(const k of ['Теплокарта зон','Топ-15 зон','Surf Coffee','Конкуренты','Метро'])ov[k].addTo(map);
 L.control.layers({'Спутник':satG,'Схема (OSM)':L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'})},ov,{collapsed:false}).addTo(map);
 
-// ---- Заметки (хранятся в браузере, localStorage) ----
-const NK='surf_notes_v1';let notes=[];
+// ---- Заметки: на сервере общие, иначе в браузере (localStorage) ----
+const NK='surf_notes_v1';let notes=[],shared=false;
 try{notes=JSON.parse(localStorage.getItem(NK)||'[]')}catch(e){}
-const saveN=()=>{try{localStorage.setItem(NK,JSON.stringify(notes))}catch(e){}};
+const nid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+notes.forEach(n=>{n.id=n.id||nid()});
+const saveLocal=()=>{try{localStorage.setItem(NK,JSON.stringify(notes))}catch(e){}};
+const hint=t=>{document.getElementById('hint').textContent=t};
+async function call(body){const r=await fetch('api/notes',{method:'POST',headers:{'X-Pass':PW,'Content-Type':'application/json'},body:JSON.stringify(body)});if(r.status===403){lostAuth()}return r}
+function lostAuth(){PW='';shared=false;try{localStorage.removeItem('surf_pw')}catch(e){}hint('Неверный пароль, заметки только локальные')}
+const timers={};
+function save(n){if(!shared)return saveLocal();clearTimeout(timers[n.id]);timers[n.id]=setTimeout(()=>call({op:'set',note:n}).then(r=>{if(!r.ok&&shared)hint('Не сохранилось: '+r.status)}),500)}
+async function pull(){
+  if(!shared)return;
+  const r=await fetch('api/notes',{headers:{'X-Pass':PW}});
+  if(r.status===403)return lostAuth();
+  if(!r.ok)return;
+  const a=await r.json();
+  if(document.activeElement?.tagName==='TEXTAREA'||JSON.stringify(a)===JSON.stringify(notes))return;
+  notes=a;draw();
+}
+async function goShared(){
+  if(!PW)PW=prompt('Пароль команды (общие заметки и отметки)')||'';
+  if(!PW)return;
+  shared=true;
+  let ok=true;
+  for(const n of notes){const r=await call({op:'set',note:n});if(!r.ok){ok=false;break}}
+  if(!shared)return;
+  if(ok){try{localStorage.removeItem(NK)}catch(e){}}
+  try{localStorage.setItem('surf_pw',PW)}catch(e){}
+  notes=[];draw();await pull();
+  document.getElementById('foot').textContent='Заметки общие: их видят все, кто знает пароль. Обновляются каждые 20 секунд.';
+  setInterval(pull,20000);
+}
 const pins=L.layerGroup().addTo(map);let placing=false;
 const pnl=document.getElementById('np'),lst=document.getElementById('nl');
 L.DomEvent.disableClickPropagation(pnl);L.DomEvent.disableScrollPropagation(pnl);
@@ -69,22 +114,23 @@ function draw(){
     if(n.lat!=null)L.marker([n.lat,n.lon],{icon:L.divIcon({className:'',html:'<div class="pin">✎</div>',iconSize:[24,24]})}).bindTooltip(n.text||'(пусто)').addTo(pins);
     const c=document.createElement('div');c.className='nc';
     const ta=document.createElement('textarea');ta.value=n.text;ta.placeholder='Заметка…';
-    ta.oninput=()=>{n.text=ta.value;saveN()};
+    ta.oninput=()=>{n.text=ta.value;save(n)};
     const r=document.createElement('div');r.className='nr';
     const d=document.createElement('span');d.textContent=new Date(n.t).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});r.append(d);
     if(n.lat!=null){const g=document.createElement('button');g.textContent='на карте';g.onclick=()=>map.flyTo([n.lat,n.lon],16);r.append(g)}
-    const x=document.createElement('button');x.textContent='удалить';x.onclick=()=>{notes=notes.filter(m=>m!==n);saveN();draw()};r.append(x);
+    const x=document.createElement('button');x.textContent='удалить';x.onclick=()=>{notes=notes.filter(m=>m!==n);if(shared)call({op:'del',id:n.id});else saveLocal();draw()};r.append(x);
     c.append(ta,r);lst.append(c);
   });
 }
-function add(lat,lon){notes.unshift({t:Date.now(),text:'',lat,lon});saveN();draw();lst.querySelector('textarea')?.focus()}
+function add(lat,lon){const n={id:nid(),t:Date.now(),text:'',lat,lon};notes.unshift(n);save(n);draw();lst.querySelector('textarea')?.focus()}
 document.getElementById('nt').onclick=()=>pnl.classList.toggle('open');
 document.getElementById('na').onclick=()=>add(null,null);
-document.getElementById('np2').onclick=()=>{placing=true;document.getElementById('m').style.cursor='crosshair';document.getElementById('hint').textContent='Кликните по карте, чтобы поставить метку'};
+document.getElementById('np2').onclick=()=>{placing=true;document.getElementById('m').style.cursor='crosshair';hint('Кликните по карте, чтобы поставить метку')};
 document.getElementById('ne').onclick=()=>{const s=notes.map(n=>new Date(n.t).toLocaleString('ru-RU')+(n.lat!=null?` [${n.lat.toFixed(5)}, ${n.lon.toFixed(5)}]`:'')+'\n'+n.text).join('\n\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([s],{type:'text/plain'}));a.download='surf-notes.txt';a.click()};
-map.on('click',e=>{if(!placing)return;placing=false;document.getElementById('m').style.cursor='';document.getElementById('hint').textContent='';pnl.classList.add('open');add(e.latlng.lat,e.latlng.lng)});
+map.on('click',e=>{if(!placing)return;placing=false;document.getElementById('m').style.cursor='';hint('');pnl.classList.add('open');add(e.latlng.lat,e.latlng.lng)});
 document.getElementById('nj').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(notes,null,1)],{type:'application/json'}));a.download='surf-notes.json';a.click()};
 const nf=document.getElementById('nf');document.getElementById('ni').onclick=()=>nf.click();
-nf.onchange=()=>{const f=nf.files[0];if(!f)return;f.text().then(t=>{try{const a=JSON.parse(t);if(!Array.isArray(a))throw 0;const have=new Set(notes.map(n=>n.t+n.text));a.filter(n=>n&&typeof n.text==='string'&&typeof n.t==='number'&&!have.has(n.t+n.text)).forEach(n=>notes.push({t:n.t,text:n.text,lat:n.lat??null,lon:n.lon??null}));saveN();draw();document.getElementById('hint').textContent='Загружено'}catch(e){document.getElementById('hint').textContent='Не удалось прочитать файл'}});nf.value=''};
+nf.onchange=()=>{const f=nf.files[0];if(!f)return;f.text().then(t=>{try{const a=JSON.parse(t);if(!Array.isArray(a))throw 0;const have=new Set(notes.map(n=>n.t+n.text));a.filter(n=>n&&typeof n.text==='string'&&typeof n.t==='number'&&!have.has(n.t+n.text)).forEach(n=>{const m={id:n.id||nid(),t:n.t,text:n.text,lat:n.lat??null,lon:n.lon??null};notes.push(m);save(m)});draw();hint('Загружено')}catch(e){hint('Не удалось прочитать файл')}});nf.value=''};
 draw();
+fetch('api/closed').then(r=>r.ok?r.json():Promise.reject()).then(d=>{api=true;Object.assign(closed,d);reg.forEach(paint);goShared()}).catch(()=>{});
 </script></body></html>
